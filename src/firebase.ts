@@ -1,7 +1,7 @@
 import { initializeApp } from 'firebase/app';
 import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
-import { getAuth } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 
 // Vite 환경 변수에서 Firebase 설정값 로드
 const firebaseConfig = {
@@ -16,9 +16,10 @@ const firebaseConfig = {
 // Firebase 초기화
 const app = initializeApp(firebaseConfig);
 
-// Firestore, Storage, Auth 인스턴스 획득 및 내보내기
+// Firestore, Storage, Auth 및 Google Provider 인스턴스 획득 및 내보내기
 export const db = getFirestore(app);
 export const storage = getStorage(app);
 export const auth = getAuth(app);
+export const googleProvider = new GoogleAuthProvider();
 
 export default app;

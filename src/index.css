@@ -988,3 +988,38 @@ p.description {
   border: 2px solid var(--border-color);
 }
 
+/* 구글 로그인 브랜드 버튼 */
+.btn-google {
+  background-color: #ffffff;
+  color: var(--text-dark);
+  border: 4px solid var(--text-dark);
+  border-radius: 20px;
+  cursor: pointer;
+  transition: all 0.1s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  font-family: var(--font-title);
+  font-size: 22px;
+  padding: 14px 28px;
+  box-shadow: var(--shadow-btn);
+  width: 100%;
+}
+
+.btn-google:hover {
+  background-color: #faf8f5;
+}
+
+.btn-google:active {
+  transform: translateY(4px);
+  box-shadow: var(--shadow-btn-active);
+}
+
+.btn-google svg {
+  width: 24px;
+  height: 24px;
+  display: block;
+}
+
+
