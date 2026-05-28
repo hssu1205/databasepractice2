@@ -1,11 +1,13 @@
-import { useState, useRef } from 'react';
-import { db, storage } from './firebase';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { useState, useRef, useEffect } from 'react';
+import { db, storage, auth } from './firebase';
+import { collection, addDoc, serverTimestamp, query, onSnapshot, orderBy } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
 import { DrawingCanvas, type DrawingCanvasRef } from './components/DrawingCanvas';
-import { ChevronRight, ChevronLeft, Heart, Smile, Sparkles } from 'lucide-react';
+import { TeacherDashboard, type MoodEntry } from './components/TeacherDashboard';
+import { ChevronRight, ChevronLeft, Heart, Smile, Sparkles, User, Lock, Eye, EyeOff } from 'lucide-react';
 
-// 감정 상태 정의 (행복, 평온, 불안, 슬픔, 화남, 피곤)
+// 감정 상태 정의
 const EMOTIONS = [
   { key: 'happy', label: '행복', emoji: '😊', description: '신나고 즐거운 마음' },
   { key: 'calm', label: '평온', emoji: '🌿', description: '편안하고 차분한 마음' },
@@ -16,18 +18,78 @@ const EMOTIONS = [
 ];
 
 type EmotionType = typeof EMOTIONS[number];
+type UserMode = 'select' | 'student' | 'teacher-login' | 'teacher-dashboard';
 
 function App() {
+  // 모드 분기 상태
+  const [userMode, setUserMode] = useState<UserMode>('select');
+  
+  // 학생용 상태
   const [step, setStep] = useState<number>(1);
   const [studentName, setStudentName] = useState<string>('');
   const [selectedEmotion, setSelectedEmotion] = useState<EmotionType | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submittedUrl, setSubmittedUrl] = useState<string>('');
+
+  // 교사 로그인용 상태
+  const [email, setEmail] = useState<string>('');
+  const [password, setPassword] = useState<string>('');
+  const [showPassword, setShowPassword] = useState<boolean>(false);
+  const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
+
+  // 공통 상태
   const [error, setError] = useState<string | null>(null);
+  const [moodEntries, setMoodEntries] = useState<MoodEntry[]>([]);
 
   const canvasRef = useRef<DrawingCanvasRef | null>(null);
 
-  // 다음 스텝으로 이동
+  // 1. Firebase Auth 상태 변화 감지 및 세션 연동
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setUserMode('teacher-dashboard');
+      } else {
+        // 로그인 해제 시 대시보드 화면에 머물러 있었다면 메인 선택 화면으로 이동
+        setUserMode((prev) => (prev === 'teacher-dashboard' ? 'select' : prev));
+      }
+    });
+
+    return () => unsubscribeAuth();
+  }, []);
+
+  // 2. 교사 모드 활성화 시 Firestore 실시간 리스너 작동 (onSnapshot)
+  useEffect(() => {
+    if (userMode !== 'teacher-dashboard') {
+      setMoodEntries([]);
+      return;
+    }
+
+    setError(null);
+    const q = query(collection(db, 'mood-entries'), orderBy('createdAt', 'desc'));
+    
+    const unsubscribeFirestore = onSnapshot(q, (snapshot) => {
+      const entriesData: MoodEntry[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        entriesData.push({
+          id: doc.id,
+          studentName: data.studentName || '이름 없음',
+          emotion: data.emotion || '알 수 없음',
+          emotionKey: data.emotionKey || 'happy',
+          imageUrl: data.imageUrl || '',
+          createdAt: data.createdAt,
+        });
+      });
+      setMoodEntries(entriesData);
+    }, (err) => {
+      console.error('Firestore 구독 오류:', err);
+      setError('정서 기록 데이터를 가져오지 못했습니다. 권한 설정을 확인해 주세요.');
+    });
+
+    return () => unsubscribeFirestore();
+  }, [userMode]);
+
+  // 학생 모드 다음 스텝 이동
   const handleNextStep = () => {
     if (step === 1 && !studentName.trim()) {
       setError('이름을 입력해 주세요!');
@@ -41,22 +103,22 @@ function App() {
     setStep((prev) => prev + 1);
   };
 
-  // 이전 스텝으로 이동
+  // 학생 모드 이전 스텝 이동
   const handlePrevStep = () => {
     setError(null);
     setStep((prev) => prev - 1);
   };
 
-  // Firebase에 최종 데이터 제출
+  // 학생용 그림 및 데이터 Firebase에 제출
   const handleSubmit = async () => {
     if (!studentName.trim() || !selectedEmotion) {
-      setError('이름과 감정 상태를 다시 확인해 주세요.');
+      setError('이름과 감정을 다시 확인해 주세요.');
       return;
     }
 
     const hasDrawn = canvasRef.current?.hasDrawn() ?? false;
     if (!hasDrawn) {
-      setError('지금 내 마음을 담아 그림을 조금이라도 그려주세요!');
+      setError('오늘 내 마음을 담아 그림을 조금이라도 그려주세요!');
       return;
     }
 
@@ -64,14 +126,11 @@ function App() {
     setError(null);
 
     try {
-      // 1. Canvas에서 그림 데이터를 JPG Blob으로 가져오기
       const blob = await canvasRef.current?.getJpgBlob();
       if (!blob) {
-        throw new Error('그림 데이터를 가져오는 데 실패했어요.');
+        throw new Error('그림 파일을 생성하지 못했습니다.');
       }
 
-      // 2. Firebase Storage에 이미지 파일 업로드
-      // 파일명: drawings/[학생이름]_[timestamp].jpg
       const fileName = `drawings/${studentName.trim()}_${Date.now()}.jpg`;
       const storageRef = ref(storage, fileName);
       
@@ -79,11 +138,9 @@ function App() {
         contentType: 'image/jpeg',
       });
 
-      // 3. 업로드된 파일의 다운로드 URL 가져오기
       const imageUrl = await getDownloadURL(uploadResult.ref);
       setSubmittedUrl(imageUrl);
 
-      // 4. Firestore에 학생 이름, 감정 상태, 이미지 파일 URL 저장
       await addDoc(collection(db, 'mood-entries'), {
         studentName: studentName.trim(),
         emotion: selectedEmotion.label,
@@ -92,18 +149,17 @@ function App() {
         createdAt: serverTimestamp(),
       });
 
-      // 5. 완료 화면으로 이동
       setStep(4);
     } catch (err: any) {
-      console.error('제출 에러:', err);
-      setError('저장하는 동안 에러가 발생했어요. 다시 한 번 시도해 보세요!');
+      console.error('제출 중 오류:', err);
+      setError('제출하지 못했습니다. 다시 시도해 주세요!');
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // 모든 데이터를 초기화하고 처음으로 돌아가기
-  const handleReset = () => {
+  // 학생 데이터 리셋
+  const handleStudentReset = () => {
     setStep(1);
     setStudentName('');
     setSelectedEmotion(null);
@@ -111,15 +167,69 @@ function App() {
     setError(null);
   };
 
-  return (
-    <>
+  // 교사 로그인 처리
+  const handleTeacherLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email.trim() || !password.trim()) {
+      setError('이메일과 비밀번호를 모두 입력해 주세요.');
+      return;
+    }
+
+    setIsLoggingIn(true);
+    setError(null);
+
+    try {
+      await signInWithEmailAndPassword(auth, email.trim(), password.trim());
+      // 로그인 성공 시 onAuthStateChanged에 의해 userMode가 'teacher-dashboard'로 변경됨
+      setEmail('');
+      setPassword('');
+    } catch (err: any) {
+      console.error('로그인 에러:', err);
+      if (err.code === 'auth/invalid-credential' || err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
+        setError('이메일 또는 비밀번호가 올바르지 않습니다.');
+      } else {
+        setError('로그인에 실패했습니다. 다시 시도해 주세요.');
+      }
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  // 교사 로그아웃
+  const handleTeacherLogout = async () => {
+    try {
+      setError(null);
+      await signOut(auth);
+      setUserMode('select');
+    } catch (err) {
+      console.error('로그아웃 에러:', err);
+      setError('로그아웃에 실패했습니다.');
+    }
+  };
+
+  // 교사 모드에서 첫 선택 화면으로 돌아가기 (로그아웃 동반)
+  const handleGoHome = async () => {
+    await handleTeacherLogout();
+  };
+
+  // UI 헤더 타이틀 및 설명 렌더링 도우미
+  const renderHeader = () => {
+    if (userMode === 'teacher-dashboard') return null; // 대시보드는 자체 헤더 사용
+    
+    return (
       <header>
         <h1>🌱 마음 모니터링</h1>
         <p className="description">오늘 내 마음은 어떤 색깔일까요? 솔직하게 표현해 보아요.</p>
       </header>
+    );
+  };
 
-      {/* 단계별 표시기 (완료 화면이 아닐 때만 렌더링) */}
-      {step <= 3 && (
+  return (
+    <div className={userMode === 'teacher-dashboard' ? 'dashboard-root' : ''}>
+      {renderHeader()}
+
+      {/* 학생 단계 표시기 */}
+      {userMode === 'student' && step <= 3 && (
         <div className="steps-indicator">
           <div className={`step-dot ${step === 1 ? 'active' : step > 1 ? 'completed' : ''}`}>1</div>
           <div className={`step-dot ${step === 2 ? 'active' : step > 2 ? 'completed' : ''}`}>2</div>
@@ -131,8 +241,155 @@ function App() {
       {error && <div className="error-msg">⚠️ {error}</div>}
 
       <main style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-        {/* Step 1: 학생 이름 입력 */}
-        {step === 1 && (
+        
+        {/* ==================================================================
+            1. 초기 진입로 선택 화면
+            ================================================================== */}
+        {userMode === 'select' && (
+          <div className="mode-selection-container">
+            <h2 style={{ fontSize: '32px', marginBottom: '10px' }}>반가워요! 어디로 가볼까요?</h2>
+            <div className="mode-cards">
+              {/* 학생 입장 카드 */}
+              <div 
+                className="mode-card student-card"
+                onClick={() => {
+                  setUserMode('student');
+                  setStep(1);
+                  setError(null);
+                }}
+              >
+                <div className="icon-wrapper">🧒</div>
+                <h3>학생 입장</h3>
+                <p>오늘 내 기분이 어떤지 선택하고 귀여운 그림으로 표현해요!</p>
+                <button type="button" className="btn btn-primary" style={{ marginTop: '10px', width: '80%' }}>
+                  <span>시작하기</span>
+                  <ChevronRight size={18} />
+                </button>
+              </div>
+
+              {/* 교사 입장 카드 */}
+              <div 
+                className="mode-card teacher-card"
+                onClick={() => {
+                  setUserMode('teacher-login');
+                  setError(null);
+                }}
+              >
+                <div className="icon-wrapper">👩‍🏫</div>
+                <h3>교사 입장</h3>
+                <p>학생들의 감정 상태 통계와 미술관 갤러리를 실시간으로 확인해요.</p>
+                <button type="button" className="btn btn-secondary" style={{ marginTop: '10px', width: '80%' }}>
+                  <span>로그인하기</span>
+                  <ChevronRight size={18} />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ==================================================================
+            2. 교사 로그인 화면
+            ================================================================== */}
+        {userMode === 'teacher-login' && (
+          <div className="card login-card">
+            <h2>👩‍🏫 선생님 로그인</h2>
+            <p style={{ textAlign: 'center', fontSize: '18px', color: '#8b7e7d', marginBottom: '20px' }}>
+              등록된 이메일과 비밀번호를 입력해 주세요.
+            </p>
+            <form onSubmit={handleTeacherLogin}>
+              <div className="input-group">
+                <label htmlFor="teacher-email">이메일</label>
+                <div style={{ position: 'relative' }}>
+                  <input
+                    id="teacher-email"
+                    type="email"
+                    placeholder="example@school.com"
+                    value={email}
+                    onChange={(e) => {
+                      setEmail(e.target.value);
+                      if (error) setError(null);
+                    }}
+                    className="input-field"
+                    style={{ paddingLeft: '45px' }}
+                    required
+                    autoFocus
+                  />
+                  <User size={20} style={{ position: 'absolute', left: '16px', top: '50%', transform: 'translateY(-50%)', color: '#8b7e7d' }} />
+                </div>
+              </div>
+
+              <div className="input-group" style={{ marginBottom: '30px' }}>
+                <label htmlFor="teacher-password">비밀번호</label>
+                <div style={{ position: 'relative' }}>
+                  <input
+                    id="teacher-password"
+                    type={showPassword ? 'text' : 'password'}
+                    placeholder="비밀번호 입력"
+                    value={password}
+                    onChange={(e) => {
+                      setPassword(e.target.value);
+                      if (error) setError(null);
+                    }}
+                    className="input-field"
+                    style={{ paddingLeft: '45px', paddingRight: '45px' }}
+                    required
+                  />
+                  <Lock size={20} style={{ position: 'absolute', left: '16px', top: '50%', transform: 'translateY(-50%)', color: '#8b7e7d' }} />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    style={{ position: 'absolute', right: '16px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#8b7e7d' }}
+                    aria-label={showPassword ? '비밀번호 숨기기' : '비밀번호 보이기'}
+                  >
+                    {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="btn-container">
+                <button 
+                  type="button" 
+                  className="btn btn-secondary" 
+                  onClick={() => {
+                    setUserMode('select');
+                    setError(null);
+                    setEmail('');
+                    setPassword('');
+                  }}
+                  disabled={isLoggingIn}
+                >
+                  <ChevronLeft size={20} />
+                  <span>이전으로</span>
+                </button>
+                
+                <button 
+                  type="submit" 
+                  className="btn btn-primary" 
+                  disabled={isLoggingIn || !email.trim() || !password.trim()}
+                >
+                  {isLoggingIn ? '로그인 중...' : '로그인'}
+                  <ChevronRight size={20} />
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {/* ==================================================================
+            3. 교사 대시보드 화면
+            ================================================================== */}
+        {userMode === 'teacher-dashboard' && (
+          <TeacherDashboard
+            entries={moodEntries}
+            onLogout={handleTeacherLogout}
+            onGoHome={handleGoHome}
+          />
+        )}
+
+        {/* ==================================================================
+            4. 학생 모드: Step 1 (이름 입력)
+            ================================================================== */}
+        {userMode === 'student' && step === 1 && (
           <div className="card">
             <h2>반가워요! 내 이름을 알려줄래요?</h2>
             <div className="input-group">
@@ -155,6 +412,17 @@ function App() {
               />
             </div>
             <div className="btn-container">
+              <button 
+                type="button" 
+                className="btn btn-secondary" 
+                onClick={() => {
+                  setUserMode('select');
+                  setError(null);
+                }}
+              >
+                <ChevronLeft size={20} />
+                <span>뒤로</span>
+              </button>
               <button
                 type="button"
                 className="btn btn-primary"
@@ -168,8 +436,10 @@ function App() {
           </div>
         )}
 
-        {/* Step 2: 감정 상태 선택 */}
-        {step === 2 && (
+        {/* ==================================================================
+            5. 학생 모드: Step 2 (감정 선택)
+            ================================================================== */}
+        {userMode === 'student' && step === 2 && (
           <div className="card">
             <h2>지금 {studentName}님의 마음 상태는 어떤가요?</h2>
             <div className="emotion-grid">
@@ -219,15 +489,16 @@ function App() {
           </div>
         )}
 
-        {/* Step 3: 그림 그리기 */}
-        {step === 3 && (
+        {/* ==================================================================
+            6. 학생 모드: Step 3 (그림 그리기)
+            ================================================================== */}
+        {userMode === 'student' && step === 3 && (
           <div className="card">
             <h2>지금 느끼는 감정을 그림으로 자유롭게 표현해 주세요!</h2>
             <p style={{ textAlign: 'center', fontSize: '18px', color: '#8b7e7d', marginBottom: '15px' }}>
               선택한 마음: <strong>{selectedEmotion?.emoji} {selectedEmotion?.label}</strong>
             </p>
             
-            {/* 드로잉 캔버스 컴포넌트 */}
             <DrawingCanvas ref={canvasRef} />
 
             <div className="btn-container">
@@ -248,8 +519,8 @@ function App() {
           </div>
         )}
 
-        {/* 로딩 인디케이터 (제출 중) */}
-        {isSubmitting && (
+        {/* 학생 모드: 제출 중 로딩 */}
+        {userMode === 'student' && isSubmitting && (
           <div className="card loading-container">
             <div className="spinner" />
             <h2>{studentName}님의 마음을 안전하게 모으고 있어요...</h2>
@@ -257,8 +528,10 @@ function App() {
           </div>
         )}
 
-        {/* Step 4: 제출 성공 피드백 */}
-        {step === 4 && (
+        {/* ==================================================================
+            7. 학생 모드: Step 4 (성공 완료 화면)
+            ================================================================== */}
+        {userMode === 'student' && step === 4 && (
           <div className="card success-container">
             <div className="success-badge">🎉</div>
             <h2 className="success-title">마음 보내기 성공!</h2>
@@ -279,7 +552,7 @@ function App() {
             )}
 
             <div className="btn-container">
-              <button type="button" className="btn btn-primary" onClick={handleReset}>
+              <button type="button" className="btn btn-primary" onClick={handleStudentReset}>
                 <Smile size={20} />
                 <span>새로운 마음 기록하기</span>
               </button>
@@ -288,10 +561,12 @@ function App() {
         )}
       </main>
 
-      <footer style={{ marginTop: '30px', textAlign: 'center', fontSize: '16px', color: '#b6ada5' }}>
-        © {new Date().getFullYear()} 마음 모니터링 웹앱. All rights reserved.
-      </footer>
-    </>
+      {userMode !== 'teacher-dashboard' && (
+        <footer style={{ marginTop: '30px', textAlign: 'center', fontSize: '16px', color: '#b6ada5' }}>
+          © {new Date().getFullYear()} 마음 모니터링 웹앱. All rights reserved.
+        </footer>
+      )}
+    </div>
   );
 }
 
